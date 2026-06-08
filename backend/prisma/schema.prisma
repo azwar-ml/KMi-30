@@ -1,0 +1,457 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ============================================================================
+// Authentication & Subscription
+// ============================================================================
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  password  String
+  name      String?
+  role      Role     @default(USER)
+  tier      SubscriptionTier @default(FREE)
+  
+  subscription   Subscription?
+  apiLogs        APILog[]
+  savedMemos     SavedMemo[]
+  alerts         UserAlert[]
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum Role {
+  USER
+  ADMIN
+  SUPERADMIN
+}
+
+enum SubscriptionTier {
+  FREE
+  PRO
+  INSTITUTIONAL
+}
+
+model Subscription {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  tier      SubscriptionTier
+  
+  maxMemos     Int      @default(10)
+  maxAlerts    Int      @default(5)
+  features     String[] @default([])
+  
+  startDate DateTime @default(now())
+  endDate   DateTime?
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+}
+
+// ============================================================================
+// Company & Market Data (Top 30 PSX Stocks)
+// ============================================================================
+
+model Company {
+  id           String   @id @default(cuid())
+  symbol       String   @unique
+  name         String
+  sector       String
+  shortName    String?
+  
+  // Indices this company belongs to
+  kmi30Index   KMI30Index?
+  kse30Index   KSE30Index?
+  
+  // Market Data
+  prices       Price[]
+  fundamentals CompanyFundamental?
+  shariah      ShariaCompliance?
+  
+  // Latest market data
+  latestPrice  Float?
+  latestVolume BigInt?
+  dayChangePercent Float?
+  lastFetchedAt DateTime?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([sector])
+  @@index([symbol])
+}
+
+model KMI30Index {
+  id        String   @id @default(cuid())
+  companyId String   @unique
+  ranking   Int      @unique
+  weight    Float    // Portfolio weight percentage
+  
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  @@index([ranking])
+}
+
+model KSE30Index {
+  id        String   @id @default(cuid())
+  companyId String   @unique
+  ranking   Int      @unique
+  weight    Float
+  
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+}
+
+// ============================================================================
+// Price & OHLCV Data (Time Series)
+// ============================================================================
+
+model Price {
+  id        String   @id @default(cuid())
+  companyId String
+  
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    BigInt
+  
+  date      DateTime
+  
+  company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@unique([companyId, date])
+  @@index([companyId, date])
+  @@index([date])
+}
+
+// ============================================================================
+// Company Fundamentals (DCF, Ratios, Business Moat)
+// ============================================================================
+
+model CompanyFundamental {
+  id        String   @id @default(cuid())
+  companyId String   @unique
+  
+  // Balance Sheet
+  totalAssets         Float?
+  totalDebt           Float?
+  equity              Float?
+  debtToAssets        Float? // Shariah check: must be < 33%
+  
+  // Income Statement
+  revenue             Float?
+  netIncome           Float?
+  operatingCashFlow   Float?
+  
+  // Valuation
+  marketCap           Float?
+  peRatio             Float?
+  pbRatio             Float?
+  
+  // Shariah Compliance Specific
+  nonHalalIncome      Float? // Must be < 5% of revenue
+  illiquidAssets      Float? // Must be > 25% for compliance buffer
+  
+  // Business Quality
+  roe                 Float?
+  roa                 Float?
+  fcf                 Float? // Free Cash Flow
+  moatStrength        String? // "Strong", "Moderate", "Weak"
+  
+  dataSource          String? // "PSX DPS" | "psxdata" | "API"
+  lastUpdated         DateTime?
+  
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  dcfAnalysis DCFAnalysis?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([companyId])
+}
+
+model DCFAnalysis {
+  id        String   @id @default(cuid())
+  fundamentalId String @unique
+  
+  // Stage 1: Explicit Forecast Period
+  forecastYears         Int      @default(5)
+  terminalGrowthRate    Float    @default(0.02) // 2%
+  wacc                  Float    @default(0.10)  // 10% discount rate
+  
+  // Stage 2: Terminal Value & Valuation
+  terminalValue         Float?
+  pvTerminalValue       Float?
+  sumPVCashFlows        Float?
+  enterpriseValue       Float?
+  
+  // Outputs
+  intrinsicValue        Float?
+  fairValue             Float?
+  downside              Float?
+  upside                Float?
+  marginOfSafety        Float?
+  
+  // Latest Company Price (for comparison)
+  currentPrice          Float?
+  
+  fundamental CompanyFundamental @relation(fields: [fundamentalId], references: [id], onDelete: Cascade)
+  
+  sensitivity DCFSensitivity[]
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@index([fundamentalId])
+}
+
+model DCFSensitivity {
+  id          String   @id @default(cuid())
+  dcfId       String
+  
+  // Variable being tested
+  variable    String   // "WACC" | "TerminalGrowth" | "FCFGrowth"
+  baseValue   Float
+  testValue   Float
+  resultValue Float
+  
+  dcf DCFAnalysis @relation(fields: [dcfId], references: [id], onDelete: Cascade)
+  
+  @@index([dcfId])
+}
+
+// ============================================================================
+// Shariah Compliance (2026 SECP Criteria)
+// ============================================================================
+
+model ShariaCompliance {
+  id        String   @id @default(cuid())
+  companyId String   @unique
+  
+  // 2026 SECP Criteria
+  debtAssetsRatio         Float?  // < 33% (PASS)
+  nonHalalIncomeRatio     Float?  // < 5% (PASS)
+  illiquidAssetsRatio     Float?  // > 25% (PASS)
+  
+  isCompliant             Boolean @default(false)
+  complianceRating        Int     @default(0) // 0-5 stars
+  marginOfSafety          Float?  // How far below/above threshold
+  
+  failingCriteria         String[] // Which criteria failed
+  flaggedForReview        Boolean @default(false)
+  
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  
+  lastAuditedAt DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@index([companyId])
+  @@index([isCompliant])
+}
+
+// ============================================================================
+// AI Memos (Analysis Cache - KMI-30 Alpha v4.0)
+// ============================================================================
+
+model AIMemo {
+  id        String   @id @default(cuid())
+  companyId String
+  
+  // 12-Section Structure
+  headerBar              String?  // Symbol, Price, Change%
+  executiveSummary       String?  // 2-3 sentences
+  
+  scorecard              String?  // Key metrics snapshot
+  recommendation         Recommendation?
+  
+  dcfAnalysis            String?  // 2-Stage DCF explanation
+  businessMoat           String?  // Competitive advantages
+  riskFactors            String?  // Downside risks
+  macroContext           String?  // GDP/Inflation/FX impact
+  
+  technicalView          String?  // Trend analysis
+  sectorComparison       String?  // Peer benchmarking
+  valuationSummary       String?  // P/E, P/B, EV/Sales
+  disclaimer             String?  // Legal boilerplate
+  
+  // Generation metadata
+  generatedBy            String   @default("Gemini-1.5-Flash")
+  generatedAt            DateTime @default(now())
+  promptTokens           Int?
+  completionTokens       Int?
+  totalCost              Float?   // Gemini API cost
+  
+  // Cache management
+  expiresAt              DateTime? // TTL for cache
+  regenerateRequired     Boolean @default(false)
+  
+  savedBy                SavedMemo[]
+  
+  @@index([companyId, generatedAt])
+  @@index([expiresAt])
+}
+
+model Recommendation {
+  id        String   @id @default(cuid())
+  memoId    String   @unique
+  
+  signal                String   // "BUY" | "HOLD" | "SELL"
+  confidence            Float    // 0.0 - 1.0
+  
+  entryZone             String?  // Price range for entry
+  fairValue             Float?
+  stopLoss              Float?
+  
+  memo AIMemo @relation(fields: [memoId], references: [id], onDelete: Cascade)
+  
+  @@index([memoId])
+}
+
+model SavedMemo {
+  id        String   @id @default(cuid())
+  userId    String
+  memoId    String
+  
+  title     String?
+  notes     String?
+  starred   Boolean @default(false)
+  
+  savedAt   DateTime @default(now())
+  
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  memo      AIMemo   @relation(fields: [memoId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, memoId])
+  @@index([userId, savedAt])
+}
+
+// ============================================================================
+// Alerts & Monitoring
+// ============================================================================
+
+model UserAlert {
+  id        String   @id @default(cuid())
+  userId    String
+  
+  symbol    String
+  condition String   // e.g., "price_drop_5%" | "debt_ratio_alert"
+  threshold Float?
+  active    Boolean @default(true)
+  
+  triggered Boolean @default(false)
+  triggeredAt DateTime?
+  
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt DateTime @default(now())
+  @@index([userId, active])
+}
+
+// ============================================================================
+// Logging & Monitoring
+// ============================================================================
+
+model ScraperLog {
+  id        String   @id @default(cuid())
+  
+  source    String   // "psx-dps" | "psxdata" | "psx-api"
+  status    String   // "SUCCESS" | "FAILED" | "PARTIAL"
+  recordsFetched Int  @default(0)
+  
+  startTime DateTime @default(now())
+  endTime   DateTime?
+  duration  Int?     // milliseconds
+  
+  error     String?
+  details   String?
+  
+  @@index([source, startTime])
+}
+
+model APILog {
+  id        String   @id @default(cuid())
+  userId    String?
+  
+  endpoint  String
+  method    String   // GET, POST, etc.
+  statusCode Int
+  
+  latency   Int      // milliseconds
+  timestamp DateTime @default(now())
+  
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  
+  @@index([userId, timestamp])
+  @@index([endpoint, statusCode])
+}
+
+model GeminiPingLog {
+  id        String   @id @default(cuid())
+  
+  status    String   // "ONLINE" | "OFFLINE" | "DEGRADED"
+  latency   Int?     // milliseconds
+  message   String?
+  
+  timestamp DateTime @default(now())
+  
+  @@index([timestamp])
+}
+
+// ============================================================================
+// ML Model Training Metadata
+// ============================================================================
+
+model MLModel {
+  id        String   @id @default(cuid())
+  
+  symbol    String
+  modelType String   // "LSTM" | "RandomForest"
+  version   String
+  
+  trainingStartDate DateTime
+  trainingEndDate   DateTime
+  accuracy  Float?
+  rmse      Float?   // Root Mean Squared Error
+  
+  status    String   @default("TRAINING") // "TRAINING" | "DEPLOYED" | "ARCHIVED"
+  
+  metrics   String?  // JSON with detailed metrics
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  @@unique([symbol, modelType, version])
+  @@index([symbol, status])
+}
+
+model ModelPrediction {
+  id        String   @id @default(cuid())
+  modelId   String
+  
+  symbol    String
+  predictedPrice Float
+  confidence Float // 0.0 - 1.0
+  horizon   Int    // days ahead
+  
+  actualPrice Float?
+  accuracy    Float?
+  
+  predictionDate DateTime @default(now())
+  resolvedDate   DateTime?
+  
+  @@index([symbol, horizon])
+  @@index([predictionDate])
+}

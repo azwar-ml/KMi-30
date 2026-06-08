@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: kmi_30_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - kmi-30-network
+
+  # Redis (for caching/sessions - optional)
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - kmi-30-network
+
+  # Backend Service (NestJS)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/kmi_30_dev
+      API_URL: http://localhost:3000
+      WEB_URL: http://localhost:3001
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      NEWS_API_KEY: ${NEWS_API_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      NODE_ENV: development
+    ports:
+      - "3000:3000"
+    depends_on:
+      - db
+      - redis
+    networks:
+      - kmi-30-network
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/dist:/app/dist
+
+  # Frontend Service (Next.js) - optional, usually run locally
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3000
+      API_URL: http://backend:3000
+    ports:
+      - "3001:3001"
+    depends_on:
+      - backend
+    networks:
+      - kmi-30-network
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/app:/app/app
+
+volumes:
+  postgres_data:
+
+networks:
+  kmi-30-network:
+    driver: bridge
